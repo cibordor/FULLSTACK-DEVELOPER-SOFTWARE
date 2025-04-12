@@ -1,0 +1,472 @@
+
+-----------------------------------------------------------------------------------------
+Estructura de tablas: 
+-----------------------------------------------------------------------------------------
+-- 1. Tabla de roles de usuarios
+CREATE TABLE roles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    descripcion VARCHAR(50) NOT NULL UNIQUE,
+    nivel_acceso INT NOT NULL DEFAULT 1,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    activo BOOLEAN DEFAULT TRUE
+);
+
+-- 2. Tabla de entidades de salud (clientes)
+CREATE TABLE entidades_salud (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    ruc VARCHAR(11) NOT NULL UNIQUE,
+    ubicacion VARCHAR(255) NOT NULL,
+    descripcion TEXT,
+    telefono VARCHAR(15),
+    correo_contacto VARCHAR(100),
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    activo BOOLEAN DEFAULT TRUE,
+    CONSTRAINT chk_ruc_format CHECK (ruc REGEXP '^[0-9]{11}$'),
+    CONSTRAINT chk_email_format CHECK (correo_contacto IS NULL OR correo_contacto REGEXP '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\\.[A-Za-z]+$')
+);
+
+-- 3. Tabla de usuarios del sistema
+CREATE TABLE usuarios (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    correo VARCHAR(100) NOT NULL UNIQUE,
+    contrasena VARCHAR(255) NOT NULL,
+    id_rol INT NOT NULL,
+    id_entidad INT,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ultimo_login TIMESTAMP NULL,
+    activo BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (id_rol) REFERENCES roles(id),
+    FOREIGN KEY (id_entidad) REFERENCES entidades_salud(id),
+    CONSTRAINT chk_email_usuario CHECK (correo REGEXP '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\\.[A-Za-z]+$')
+);
+
+-- 4. Tabla de vehículos
+CREATE TABLE vehiculos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    placa VARCHAR(10) NOT NULL UNIQUE,
+    modelo VARCHAR(50),
+    capacidad DECIMAL(10, 2) CHECK (capacidad > 0),
+    fecha_adquisicion DATE,
+    ultimo_mantenimiento DATE,
+    activo BOOLEAN DEFAULT TRUE
+);
+
+-- 5. Tabla de rutas
+CREATE TABLE rutas (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    codigo VARCHAR(10) NOT NULL UNIQUE,
+    descripcion VARCHAR(100) NOT NULL,
+    zona VARCHAR(50) NOT NULL,
+    distancia_km DECIMAL(10, 2) CHECK (distancia_km > 0),
+    activa BOOLEAN DEFAULT TRUE
+);
+
+-- 6. Tabla de personal operativo
+CREATE TABLE personal_operativo (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    dni VARCHAR(8) NOT NULL UNIQUE CHECK (dni REGEXP '^[0-9]{8}$'),
+    licencia_conducir VARCHAR(15),
+    id_vehiculo INT,
+    fecha_contratacion DATE NOT NULL,
+    activo BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id)
+);
+
+-- 7. Tabla principal de recolecciones
+CREATE TABLE recolecciones (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fecha_hora TIMESTAMP NOT NULL,
+    mes INT NOT NULL CHECK (mes BETWEEN 1 AND 12),
+    comprobante VARCHAR(50) UNIQUE,
+    id_usuario INT NOT NULL,
+    id_entidad INT NOT NULL,
+    id_vehiculo INT,
+    id_ruta INT,
+    n_bolsas_rojas INT NOT NULL CHECK (n_bolsas_rojas >= 0),
+    peso_bolsas_rojas DECIMAL(10, 2) NOT NULL CHECK (peso_bolsas_rojas >= 0),
+    n_cajas_galones INT NOT NULL CHECK (n_cajas_galones >= 0),
+    peso_cajas_galones DECIMAL(10, 2) NOT NULL CHECK (peso_cajas_galones >= 0),
+    n_bolsas_amarillas INT NOT NULL CHECK (n_bolsas_amarillas >= 0),
+    peso_bolsas_amarillas DECIMAL(10, 2) NOT NULL CHECK (peso_bolsas_amarillas >= 0),
+    peso_total_kg DECIMAL(10, 2) NOT NULL CHECK (peso_total_kg >= 0),
+    peso_total_toneladas DECIMAL(10, 2) NOT NULL CHECK (peso_total_toneladas >= 0),
+    observaciones TEXT,
+    estado ENUM('programada', 'en-proceso', 'completada', 'cancelada') DEFAULT 'programada',
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id),
+    FOREIGN KEY (id_entidad) REFERENCES entidades_salud(id),
+    FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id),
+    FOREIGN KEY (id_ruta) REFERENCES rutas(id)
+);
+
+-- 8. Tabla para adjuntar archivos
+CREATE TABLE adjuntos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    id_recoleccion INT NOT NULL,
+    tipo ENUM('Manifiesto', 'Guía', 'Certificado', 'Acta', 'Checklist', 'Otro') NOT NULL,
+    archivo LONGBLOB NOT NULL,
+    nombre_archivo VARCHAR(255) NOT NULL,
+    content_type VARCHAR(100) NOT NULL,
+    tamanio_bytes BIGINT NOT NULL CHECK (tamanio_bytes > 0),
+    fecha_subida TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id_usuario_subio INT NOT NULL,
+    FOREIGN KEY (id_recoleccion) REFERENCES recolecciones(id) ON DELETE CASCADE,
+    FOREIGN KEY (id_usuario_subio) REFERENCES usuarios(id)
+);
+
+-- 9. Tabla de facturación
+CREATE TABLE facturacion (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    id_recoleccion INT NOT NULL,
+    numero_factura VARCHAR(20) NOT NULL UNIQUE,
+    monto DECIMAL(10, 2) NOT NULL CHECK (monto > 0),
+    fecha TIMESTAMP NOT NULL,
+    estado ENUM('pendiente', 'pagada', 'cancelada') DEFAULT 'pendiente',
+    metodo_pago ENUM('transferencia', 'efectivo', 'tarjeta', 'otros'),
+    FOREIGN KEY (id_recoleccion) REFERENCES recolecciones(id)
+);
+
+-- 10. Tabla de logs
+CREATE TABLE log_usuarios (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT,
+    accion ENUM('INSERT', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'OTHER') NOT NULL,
+    tabla_afectada VARCHAR(50),
+    detalles TEXT,
+    direccion_ip VARCHAR(45),
+    user_agent TEXT,
+    fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id)
+);
+
+
+
+-------------------------------------------------------------------------------------------
+Triguer y disparadores
+-------------------------------------------------------------------------------------------
+1. Triggers para Cálculo Automático de Pesos
+
+DELIMITER //
+
+CREATE TRIGGER trigger_calculo_peso_insert
+BEFORE INSERT ON recolecciones
+FOR EACH ROW
+BEGIN
+    SET NEW.peso_total_kg = NEW.peso_bolsas_rojas + NEW.peso_cajas_galones + NEW.peso_bolsas_amarillas;
+    SET NEW.peso_total_toneladas = NEW.peso_total_kg / 1000.0;
+END//
+
+CREATE TRIGGER trigger_calculo_peso_update
+BEFORE UPDATE ON recolecciones
+FOR EACH ROW
+BEGIN
+    SET NEW.peso_total_kg = NEW.peso_bolsas_rojas + NEW.peso_cajas_galones + NEW.peso_bolsas_amarillas;
+    SET NEW.peso_total_toneladas = NEW.peso_total_kg / 1000.0;
+END//
+
+DELIMITER ;
+
+2. Triggers para Registro de Logs (Versión Mejorada)
+
+DELIMITER //
+
+CREATE TRIGGER trigger_log_insert_recoleccion
+AFTER INSERT ON recolecciones
+FOR EACH ROW
+BEGIN
+    INSERT INTO log_usuarios(id_usuario, accion, tabla_afectada, detalles)
+    VALUES (
+        NEW.id_usuario, 
+        'INSERT', 
+        'recolecciones', 
+        CONCAT('Nueva recolección ID: ', NEW.id, ' - Entidad: ', NEW.id_entidad, ' - Peso: ', NEW.peso_total_kg, ' kg')
+    );
+END//
+
+CREATE TRIGGER trigger_log_update_recoleccion
+AFTER UPDATE ON recolecciones
+FOR EACH ROW
+BEGIN
+    INSERT INTO log_usuarios(id_usuario, accion, tabla_afectada, detalles)
+    VALUES (
+        NEW.id_usuario, 
+        'UPDATE', 
+        'recolecciones', 
+        CONCAT('Actualización recolección ID: ', NEW.id, 
+               ' | Cambios: ', 
+               IF(OLD.estado != NEW.estado, CONCAT('Estado: ', OLD.estado, '→', NEW.estado, ' '), ''),
+               IF(OLD.peso_total_kg != NEW.peso_total_kg, CONCAT('Peso: ', OLD.peso_total_kg, '→', NEW.peso_total_kg, 'kg '), '')
+        )
+    );
+END//
+
+CREATE TRIGGER trigger_log_delete_recoleccion
+AFTER DELETE ON recolecciones
+FOR EACH ROW
+BEGIN
+    INSERT INTO log_usuarios(id_usuario, accion, tabla_afectada, detalles)
+    VALUES (
+        OLD.id_usuario, 
+        'DELETE', 
+        'recolecciones', 
+        CONCAT('Eliminación recolección ID: ', OLD.id, ' - Entidad: ', OLD.id_entidad)
+    );
+END//
+
+DELIMITER ;
+
+3. Trigger para Validación de Entidades de Salud (Adicional)
+
+DELIMITER //
+
+CREATE TRIGGER validate_entidad_insert
+BEFORE INSERT ON entidades_salud
+FOR EACH ROW
+BEGIN
+    -- Validar RUC (11 dígitos)
+    IF NEW.ruc NOT REGEXP '^[0-9]{11}$' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Error: El RUC debe contener exactamente 11 dígitos numéricos';
+    END IF;
+    
+    -- Validar email si está presente
+    IF NEW.correo_contacto IS NOT NULL AND NEW.correo_contacto NOT REGEXP '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\\.[A-Za-z]+$' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Error: Formato de correo electrónico inválido';
+    END IF;
+END//
+
+CREATE TRIGGER validate_entidad_update
+BEFORE UPDATE ON entidades_salud
+FOR EACH ROW
+BEGIN
+    -- Validar RUC (11 dígitos)
+    IF NEW.ruc NOT REGEXP '^[0-9]{11}$' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Error: El RUC debe contener exactamente 11 dígitos numéricos';
+    END IF;
+    
+    -- Validar email si está presente
+    IF NEW.correo_contacto IS NOT NULL AND NEW.correo_contacto NOT REGEXP '^[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\\.[A-Za-z]+$' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Error: Formato de correo electrónico inválido';
+    END IF;
+END//
+
+DELIMITER ;
+
+4. Trigger para Actualización de Vehículos (Ejemplo Adicional)
+DELIMITER //
+
+CREATE TRIGGER after_vehiculo_update
+AFTER UPDATE ON vehiculos
+FOR EACH ROW
+BEGIN
+    -- Registrar cambio de estado del vehículo
+    IF OLD.activo != NEW.activo THEN
+        INSERT INTO log_usuarios(id_usuario, accion, tabla_afectada, detalles)
+        VALUES (
+            NULL, -- Puedes cambiar esto por el usuario actual si tienes esa información
+            'SYSTEM', 
+            'vehiculos', 
+            CONCAT('Cambio de estado vehículo ', NEW.placa, ': ', 
+                   IF(NEW.activo, 'ACTIVADO', 'DESACTIVADO'))
+        );
+    END IF;
+    
+    -- Registrar cambios importantes en el vehículo
+    IF OLD.placa != NEW.placa OR OLD.capacidad != NEW.capacidad THEN
+        INSERT INTO log_usuarios(id_usuario, accion, tabla_afectada, detalles)
+        VALUES (
+            NULL,
+            'UPDATE', 
+            'vehiculos', 
+            CONCAT('Modificación vehículo ID: ', NEW.id, 
+                   IF(OLD.placa != NEW.placa, CONCAT(' | Placa: ', OLD.placa, '→', NEW.placa), ''),
+                   IF(OLD.capacidad != NEW.capacidad, CONCAT(' | Capacidad: ', OLD.capacidad, '→', NEW.capacidad, ' kg'), ''))
+        );
+    END IF;
+END//
+
+DELIMITER ;
+
+
+-------------------------------------------------------------------------------------------
+INSERTANDO DATOS:
+-------------------------------------------------------------------------------------------
+-- -- -- 1. Insertar roles mejorados con niveles de acceso
+INSERT INTO roles (descripcion, nivel_acceso) VALUES 
+('Administrador del Sistema', 5),
+('Operador Logístico', 4),
+('Conductor de Recolección', 3),
+('Representante Clínico', 2),
+('Supervisor de Calidad', 4),
+('Auditor Externo', 3);
+
+-- 2. Insertar entidades de salud más completas y profesionales
+INSERT INTO entidades_salud (nombre, ruc, ubicacion, descripcion, telefono, correo_contacto) VALUES
+('Clínica San Juan S.A.', '20123456781', 'Av. San Juan 123, San Isidro, Lima', 'Centro médico especializado en cardiología y neurología con 20 años de experiencia. Certificación ISO 9001:2015.', '014412345', 'contacto@clinicasanjuan.com'),
+('Hospital Santa María E.I.R.L.', '20234567892', 'Jr. Santa María 456, Yanahuara, Arequipa', 'Hospital general de tercer nivel con 150 camas, servicio de emergencias 24/7 y unidad de cuidados intensivos.', '054123456', 'info@hospitalsantamaria.com'),
+('Laboratorio Diagnóstico Rápido SAC', '20345678903', 'Calle Los Pinos 789, Urb. El Recreo, Trujillo', 'Laboratorio clínico especializado en análisis moleculares y pruebas COVID-19. Equipos de última generación.', '044987654', 'atencion@diagnosticorapido.com'),
+('Centro Médico Esperanza S.A.C.', '20456789014', 'Av. La Marina 321, Piura', 'Red de centros médicos con 5 especialidades principales y servicio de telemedicina.', '073456789', 'esperanza@clinicaesperanza.com'),
+('Clínica Dental Sonrisas Perfectas E.I.R.L.', '20567890125', 'Jr. Unión 654, Chiclayo', 'Clínica odontológica con tecnología CAD/CAM, ortodoncia invisible y cirugía maxilofacial.', '074567890', 'sonrisas@clinicadental.com'),
+('Clínica Oncológica Vida Sana', '20678901236', 'Av. Brasil 987, Jesús María, Lima', 'Especializada en tratamiento oncológico con acelerador lineal y quimioterapia.', '014567890', 'vidasana@clinicaoncologica.com'),
+('Hospital Pediátrico San Rafael', '20789012347', 'Calle Lima 654, Cercado, Cusco', 'Hospital exclusivo para pacientes pediátricos con 24 especialidades.', '084123456', 'sanrafael@hospitalpediatrico.com'),
+('Centro de Diagnóstico por Imágenes Avanzado', '20890123458', 'Av. Salaverry 321, Magdalena, Lima', 'Tomografía multicorte, resonancia magnética 3T y mamografía digital.', '014321654', 'diagnostico@imagenesavanzadas.com');
+
+-- 3. Insertar usuarios profesionales
+INSERT INTO usuarios (nombre, correo, contrasena, id_rol, id_entidad) VALUES
+('Alberto Mendoza Cisneros', 'a.mendoza@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 1, NULL), -- admin123
+('Lucía Fernández Rojas', 'l.fernandez@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 2, NULL), -- oper456
+('Carlos Pérez Gonzales', 'c.perez@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 3, NULL), -- driver789
+('Luis García Vargas', 'l.garcia@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 3, NULL), -- pass1234
+('María Rodríguez Llontop', 'm.rodriguez@clinicasanjuan.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 4, 1), -- clinica1
+('Juan López Montenegro', 'j.lopez@hospitalsantamaria.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 4, 2), -- password
+('Ana Martínez Salazar', 'a.martinez@diagnosticorapido.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 4, 3), -- securePass
+('Ricardo Torres Díaz', 'r.torres@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 5, NULL), -- quality1
+('Pedro Sánchez Ruiz', 'p.sanchez@gesresiduos.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 3, NULL), -- safePass2
+('Karla Gómez Paredes', 'k.gomez@clinicaesperanza.com', '$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDq4wXmW7qBv7d4ZJ4B1CQO8Yj1qO2', 4, 4); -- client456
+
+-- 4. Vehículos con información técnica completa
+INSERT INTO vehiculos (placa, modelo, capacidad, fecha_adquisicion, ultimo_mantenimiento) VALUES
+('ABC-123', 'Hyundai HD78 2022', 3500.00, '2022-03-15', '2023-06-20'),
+('DEF-456', 'Toyota Dyna 300 2021', 4000.00, '2021-05-10', '2023-05-15'),
+('GHI-789', 'Nissan Atlas H43 2020', 5000.00, '2020-08-22', '2023-07-10'),
+('JKL-012', 'Isuzu NPR 75 2023', 4500.00, '2023-01-30', '2023-08-05'),
+('MNO-345', 'Mitsubishi Fuso Canter 2022', 6000.00, '2022-11-18', '2023-07-28'),
+('PQR-678', 'Mercedes-Benz Atego 2021', 5500.00, '2021-09-05', '2023-06-30'),
+('STU-901', 'Volkswagen Delivery 2023', 4800.00, '2023-02-14', '2023-08-15'),
+('VWX-234', 'Hino 300 2020', 5200.00, '2020-07-30', '2023-07-22');
+
+-- Primero, insertar las rutas si no existen
+INSERT IGNORE INTO rutas (id, codigo, descripcion, zona, distancia_km, activa) VALUES
+(1, 'LN-01', 'Lima Norte - Clínicas y Hospitales', 'Los Olivos, Comas, Independencia', 45.2, TRUE),
+(2, 'LC-02', 'Lima Centro - Laboratorios y Centros Médicos', 'Lince, Jesús María, San Isidro', 38.7, TRUE),
+(3, 'LS-03', 'Lima Sur - Clínicas Odontológicas', 'Chorrillos, Surco, Barranco', 42.5, TRUE),
+(4, 'LE-04', 'Lima Este - Hospitales Generales', 'Ate, La Molina, Santa Anita', 50.1, TRUE),
+(5, 'LO-05', 'Lima Oeste - Centros de Diagnóstico', 'Callao, San Miguel, Magdalena', 47.8, TRUE);
+
+-- 6. Personal operativo con datos completos
+INSERT INTO personal_operativo (nombre, dni, licencia_conducir, id_vehiculo, fecha_contratacion) VALUES
+('Carlos Pérez Gonzales', '12345678', 'B12345678', 1, '2021-03-15'),
+('Luis García Vargas', '23456789', 'B23456789', 2, '2020-11-22'),
+('Pedro Sánchez Ruiz', '34567890', 'B34567890', 3, '2022-01-10'),
+('Miguel Torres Díaz', '45678901', 'B45678901', 4, '2021-08-05'),
+('Jorge Mendoza Flores', '56789012', 'B56789012', 5, '2020-05-18'),
+('Raúl Castro Jiménez', '67890123', 'B67890123', 6, '2022-03-30'),
+('Diego Suárez López', '78901234', 'B78901234', 7, '2023-02-14'),
+('Fernando Ríos Paredes', '89012345', 'B89012345', 8, '2021-07-22');
+
+-- Luego insertar las recolecciones
+INSERT INTO recolecciones (fecha_hora, mes, comprobante, id_usuario, id_entidad, id_vehiculo, id_ruta, 
+                          n_bolsas_rojas, peso_bolsas_rojas, n_cajas_galones, peso_cajas_galones, 
+                          n_bolsas_amarillas, peso_bolsas_amarillas, observaciones, estado) VALUES
+('2023-01-05 08:30:00', 1, 'REC-2023-0001', 2, 1, 1, 1, 15, 75.50, 3, 12.25, 8, 40.00, 'Recolección normal sin incidencias', 'completada'),
+('2023-01-07 09:15:00', 1, 'REC-2023-0002', 2, 2, 2, 2, 20, 92.30, 5, 18.75, 10, 52.50, 'Material bien clasificado', 'completada'),
+('2023-01-10 10:00:00', 1, 'REC-2023-0003', 2, 3, 3, 3, 12, 60.25, 2, 8.50, 6, 30.00, 'Falta de espacio en almacén', 'completada'),
+('2023-01-12 11:20:00', 1, 'REC-2023-0004', 2, 4, 4, 4, 18, 85.75, 4, 15.00, 9, 45.25, 'Retraso por tráfico', 'completada'),
+('2023-01-15 14:30:00', 1, 'REC-2023-0005', 2, 5, 5, 5, 10, 50.50, 1, 5.25, 5, 25.00, 'Cantidad menor a lo esperado', 'completada'),
+('2023-02-02 08:45:00', 2, 'REC-2023-0006', 2, 1, 6, 1, 22, 105.25, 6, 22.50, 12, 60.00, 'Material bien embalado', 'completada'),
+('2023-02-05 09:30:00', 2, 'REC-2023-0007', 2, 2, 7, 2, 17, 82.75, 4, 15.75, 8, 42.50, 'Personal muy colaborador', 'completada'),
+('2023-02-08 10:15:00', 2, 'REC-2023-0008', 2, 3, 8, 3, 14, 68.50, 3, 11.25, 7, 35.00, 'Sin novedad', 'completada'),
+('2023-02-10 11:45:00', 2, 'REC-2023-0009', 2, 4, 1, 4, 19, 90.25, 5, 18.00, 10, 50.50, 'Equipo de protección completo', 'completada'),
+('2023-02-14 15:00:00', 2, 'REC-2023-0010', 2, 5, 2, 5, 11, 55.75, 2, 7.50, 6, 30.25, 'Día de menor actividad', 'completada'),
+('2023-03-03 08:30:00', 3, 'REC-2023-0011', 2, 1, 3, 1, 16, 78.00, 4, 14.25, 8, 40.50, 'Proceso eficiente', 'completada'),
+('2023-03-06 09:45:00', 3, 'REC-2023-0012', 2, 2, 4, 2, 21, 98.50, 5, 19.75, 11, 55.00, 'Material bien identificado', 'completada'),
+('2023-03-09 10:30:00', 3, 'REC-2023-0013', 2, 3, 5, 3, 13, 65.25, 3, 10.50, 7, 35.25, 'Almacén organizado', 'completada'),
+('2023-03-11 11:15:00', 3, 'REC-2023-0014', 2, 4, 6, 4, 17, 83.75, 4, 16.00, 9, 45.00, 'Sin observaciones', 'completada'),
+('2023-03-15 14:45:00', 3, 'REC-2023-0015', 2, 5, 7, 5, 9, 45.50, 2, 6.75, 5, 25.50, 'Volumen reducido', 'completada'),
+('2023-04-04 08:15:00', 4, 'REC-2023-0016', 2, 1, 8, 1, 18, 87.25, 5, 17.50, 9, 47.50, 'Proceso rápido', 'completada'),
+('2023-04-07 09:30:00', 4, 'REC-2023-0017', 2, 2, 1, 2, 23, 110.75, 6, 23.25, 12, 62.50, 'Gran volumen de material', 'completada'),
+('2023-04-10 10:45:00', 4, 'REC-2023-0018', 2, 3, 2, 3, 15, 72.50, 3, 12.00, 8, 40.00, 'Todo en orden', 'completada'),
+('2023-04-12 11:30:00', 4, 'REC-2023-0019', 2, 4, 3, 4, 20, 95.25, 5, 19.00, 10, 52.75, 'Material bien clasificado', 'completada'),
+('2023-04-16 15:15:00', 4, 'REC-2023-0020', 2, 5, 4, 5, 12, 60.75, 3, 10.25, 6, 32.50, 'Sin incidencias', 'completada');
+
+-- Insertar adjuntos con tamaño de archivo simulado
+INSERT INTO adjuntos (id_recoleccion, tipo, archivo, nombre_archivo, content_type, tamanio_bytes, id_usuario_subio) VALUES
+(1, 'Manifiesto', NULL, 'manifiesto_rec_0001.pdf', 'application/pdf', 1024, 2),
+(1, 'Guía', NULL, 'guia_rec_0001.pdf', 'application/pdf', 2048, 2),
+(1, 'Certificado', NULL, 'certificado_rec_0001.pdf', 'application/pdf', 3072, 2),
+(2, 'Manifiesto', NULL, 'manifiesto_rec_0002.pdf', 'application/pdf', 1152, 2),
+(2, 'Guía', NULL, 'guia_rec_0002.pdf', 'application/pdf', 2256, 2),
+(2, 'Acta', NULL, 'acta_rec_0002.pdf', 'application/pdf', 1850, 2),
+(3, 'Manifiesto', NULL, 'manifiesto_rec_0003.pdf', 'application/pdf', 980, 2),
+(3, 'Checklist', NULL, 'checklist_rec_0003.pdf', 'application/pdf', 750, 2),
+(3, 'Certificado', NULL, 'certificado_rec_0003.pdf', 'application/pdf', 2100, 2),
+(4, 'Manifiesto', NULL, 'manifiesto_rec_0004.pdf', 'application/pdf', 1250, 2),
+(4, 'Guía', NULL, 'guia_rec_0004.pdf', 'application/pdf', 1950, 2),
+(4, 'Acta', NULL, 'acta_rec_0004.pdf', 'application/pdf', 1650, 2),
+(5, 'Manifiesto', NULL, 'manifiesto_rec_0005.pdf', 'application/pdf', 1100, 2),
+(5, 'Checklist', NULL, 'checklist_rec_0005.pdf', 'application/pdf', 850, 2),
+(5, 'Certificado', NULL, 'certificado_rec_0005.pdf', 'application/pdf', 2300, 2),
+(6, 'Manifiesto', NULL, 'manifiesto_rec_0006.pdf', 'application/pdf', 1350, 2),
+(6, 'Guía', NULL, 'guia_rec_0006.pdf', 'application/pdf', 2450, 2),
+(6, 'Acta', NULL, 'acta_rec_0006.pdf', 'application/pdf', 1750, 2),
+(7, 'Manifiesto', NULL, 'manifiesto_rec_0007.pdf', 'application/pdf', 1050, 2),
+(7, 'Checklist', NULL, 'checklist_rec_0007.pdf', 'application/pdf', 920, 2);
+
+-- Insertar adjuntos solo para recolecciones que existen
+INSERT INTO adjuntos (id_recoleccion, tipo, archivo, nombre_archivo, content_type, tamanio_bytes, id_usuario_subio) VALUES
+(41, 'Manifiesto', NULL, 'manifiesto_rec_0041.pdf', 'application/pdf', 1024, 2),
+(41, 'Guía', NULL, 'guia_rec_0041.pdf', 'application/pdf', 2048, 2),
+(41, 'Certificado', NULL, 'certificado_rec_0041.pdf', 'application/pdf', 3072, 2),
+(42, 'Manifiesto', NULL, 'manifiesto_rec_0042.pdf', 'application/pdf', 1152, 2),
+(42, 'Guía', NULL, 'guia_rec_0042.pdf', 'application/pdf', 2256, 2),
+(42, 'Acta', NULL, 'acta_rec_0042.pdf', 'application/pdf', 1850, 2),
+(43, 'Manifiesto', NULL, 'manifiesto_rec_0043.pdf', 'application/pdf', 980, 2),
+(43, 'Checklist', NULL, 'checklist_rec_0043.pdf', 'application/pdf', 750, 2),
+(43, 'Certificado', NULL, 'certificado_rec_0043.pdf', 'application/pdf', 2100, 2),
+(44, 'Manifiesto', NULL, 'manifiesto_rec_0044.pdf', 'application/pdf', 1250, 2),
+(44, 'Guía', NULL, 'guia_rec_0044.pdf', 'application/pdf', 1950, 2),
+(44, 'Acta', NULL, 'acta_rec_0044.pdf', 'application/pdf', 1650, 2),
+(45, 'Manifiesto', NULL, 'manifiesto_rec_0045.pdf', 'application/pdf', 1100, 2),
+(45, 'Checklist', NULL, 'checklist_rec_0045.pdf', 'application/pdf', 850, 2),
+(45, 'Certificado', NULL, 'certificado_rec_0045.pdf', 'application/pdf', 2300, 2),
+(46, 'Manifiesto', NULL, 'manifiesto_rec_0046.pdf', 'application/pdf', 1350, 2),
+(46, 'Guía', NULL, 'guia_rec_0046.pdf', 'application/pdf', 2450, 2),
+(46, 'Acta', NULL, 'acta_rec_0046.pdf', 'application/pdf', 1750, 2),
+(47, 'Manifiesto', NULL, 'manifiesto_rec_0047.pdf', 'application/pdf', 1050, 2),
+(47, 'Checklist', NULL, 'checklist_rec_0047.pdf', 'application/pdf', 920, 2);
+
+
+
+-- 9. Facturación profesional con IDs de recolección correctos (41-60)
+INSERT INTO facturacion (id_recoleccion, numero_factura, monto, fecha, estado, metodo_pago) VALUES
+(41, 'F001-0041', 450.00, '2023-01-06 10:00:00', 'pagada', 'transferencia'),
+(42, 'F001-0042', 550.00, '2023-01-08 11:30:00', 'pagada', 'transferencia'),
+(43, 'F001-0043', 380.00, '2023-01-11 12:15:00', 'pagada', 'efectivo'),
+(44, 'F001-0044', 500.00, '2023-01-13 14:20:00', 'pagada', 'transferencia'),
+(45, 'F001-0045', 320.00, '2023-01-16 16:00:00', 'pagada', 'efectivo'),
+(46, 'F001-0046', 600.00, '2023-02-03 10:30:00', 'pagada', 'transferencia'),
+(47, 'F001-0047', 480.00, '2023-02-06 11:45:00', 'pagada', 'transferencia'),
+(48, 'F001-0048', 400.00, '2023-02-09 13:00:00', 'pagada', 'efectivo'),
+(49, 'F001-0049', 520.00, '2023-02-11 15:30:00', 'pagada', 'transferencia'),
+(50, 'F001-0050', 350.00, '2023-02-15 17:15:00', 'pagada', 'efectivo'),
+(51, 'F001-0051', 470.00, '2023-03-04 11:00:00', 'pagada', 'transferencia'),
+(52, 'F001-0052', 580.00, '2023-03-07 12:30:00', 'pagada', 'transferencia'),
+(53, 'F001-0053', 390.00, '2023-03-10 14:00:00', 'pagada', 'efectivo'),
+(54, 'F001-0054', 510.00, '2023-03-12 15:45:00', 'pagada', 'transferencia'),
+(55, 'F001-0055', 330.00, '2023-03-16 17:30:00', 'pagada', 'efectivo'),
+(56, 'F001-0056', 490.00, '2023-04-05 11:30:00', 'pagada', 'transferencia'),
+(57, 'F001-0057', 620.00, '2023-04-08 13:00:00', 'pagada', 'transferencia'),
+(58, 'F001-0058', 420.00, '2023-04-11 14:30:00', 'pagada', 'efectivo'),
+(59, 'F001-0059', 540.00, '2023-04-13 16:00:00', 'pagada', 'transferencia'),
+(60, 'F001-0060', 360.00, '2023-04-17 17:45:00', 'pagada', 'efectivo');
+
+-- 10. Datos adicionales para logs con referencias actualizadas
+INSERT INTO log_usuarios (id_usuario, accion, tabla_afectada, detalles, direccion_ip) VALUES
+(1, 'LOGIN', 'sistema', 'Inicio de sesión', '192.168.1.100'),
+(2, 'INSERT', 'recolecciones', 'Creó recolección ID: 41', '192.168.1.101'),
+(3, 'UPDATE', 'vehiculos', 'Actualizó información del vehículo ABC-123', '192.168.1.102'),
+(4, 'DELETE', 'adjuntos', 'Eliminó adjunto ID: 15', '192.168.1.103'),
+(5, 'LOGIN', 'sistema', 'Inicio de sesión', '192.168.1.104'),
+(6, 'INSERT', 'facturacion', 'Generó factura F001-0041', '192.168.1.105'),
+(7, 'UPDATE', 'usuarios', 'Actualizó su perfil', '192.168.1.106'),
+(8, 'LOGIN', 'sistema', 'Inicio de sesión', '192.168.1.107'),
+(9, 'INSERT', 'recolecciones', 'Creó recolección ID: 42', '192.168.1.108'),
+(10, 'LOGOUT', 'sistema', 'Cierre de sesión', '192.168.1.109'),
+(2, 'INSERT', 'adjuntos', 'Agregó adjunto para recolección 41', '192.168.1.110'),
+(2, 'INSERT', 'adjuntos', 'Agregó adjunto para recolección 42', '192.168.1.110'),
+(6, 'INSERT', 'facturacion', 'Generó factura F001-0042', '192.168.1.105');
